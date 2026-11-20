@@ -1,0 +1,114 @@
+name: macOS DMG Public Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeartsagent-macos-public-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            node_arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+            node_arch: x64
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - name: Checkout private source branch
+        uses: actions/checkout@v4
+        with:
+          repository: David-piex/cc-switch-codearts-macos-build
+          ref: codeartsagent-4.0.38-mac
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95
+          targets: ${{ matrix.target }}
+
+      - name: Bundle the matching CodeArts Node runtime
+        shell: bash
+        env:
+          NODE_VERSION: v24.17.0
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          runtime_dir="src-tauri/resources/codeartsagent/node"
+          mkdir -p "$runtime_dir"
+          rm -f "$runtime_dir/node.exe"
+          archive="$RUNNER_TEMP/node-${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz" -o "$archive"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          extracted="$RUNNER_TEMP/node-${NODE_VERSION}-darwin-${NODE_ARCH}"
+          cp "$extracted/bin/node" "$runtime_dir/node"
+          cp "$extracted/LICENSE" "$runtime_dir/LICENSE"
+          chmod +x "$runtime_dir/node"
+          "$runtime_dir/node" --version
+
+      - name: Build unsigned Tauri app
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles app \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Package ad-hoc signed DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          app="src-tauri/target/${{ matrix.target }}/release/bundle/macos/CC Switch.app"
+          stage="$RUNNER_TEMP/dmg-stage"
+          dmg="CC-Switch-CodeArts-${version}-macOS-${{ matrix.arch }}.dmg"
+          test -d "$app"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "$app" "$stage/CC Switch.app"
+          ln -s /Applications "$stage/Applications"
+          codesign --force --deep --sign - "$stage/CC Switch.app"
+          codesign --verify --deep --strict --verbose=2 "$stage/CC Switch.app"
+          hdiutil create -volname "CC Switch" -srcfolder "$stage" -ov -format UDZO "$dmg"
+          shasum -a 256 "$dmg" | tee "$dmg.sha256"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-${{ matrix.arch }}
+          path: |
+            source/*.dmg
+            source/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7
