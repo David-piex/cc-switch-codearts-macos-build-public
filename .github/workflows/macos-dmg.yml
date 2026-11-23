@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: David-piex/cc-switch-codearts-macos-build
-          ref: codeartsagent-4.0.38-mac
+          ref: codeartsagent-4.0.39-mac
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           path: source
 
